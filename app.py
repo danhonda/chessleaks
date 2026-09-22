@@ -47,6 +47,23 @@ if not STOCKFISH_PATH:
     )
     st.stop()
 
+# Custom CSS for compact card styling and button-like selection
+st.markdown("""
+<style>
+div[data-testid="stExpander"] div[data-testid="stVerticalBlock"] > div:has(button[key^="card_btn_"]) {
+    padding: 0 !important;
+    margin: 0 !important;
+}
+button[key^="card_btn_"] {
+    width: 100% !important;
+    border-radius: 8px !important;
+    padding: 6px 10px !important;
+    font-size: 13px !important;
+    margin-top: 4px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- HELPER FUNCTIONS ---
 def get_my_eval(info, my_color):
     score = info["score"].white() if my_color == chess.WHITE else info["score"].black()
@@ -55,7 +72,6 @@ def get_my_eval(info, my_color):
     return (score.score() or 0) / 100.0
 
 def get_opening_signature_and_fen(game, plies=4):
-    """Extracts opening lines formatted across newlines (e.g., '1. e4 c6\\n2. d4 d5')."""
     temp_board = game.board()
     moves = list(game.mainline_moves())[:plies]
     move_lines = []
@@ -74,17 +90,16 @@ def get_opening_signature_and_fen(game, plies=4):
     if current_line:
         move_lines.append(" ".join(current_line))
         
-    sig = "\n".join(move_lines) if move_lines else "Unknown Setup"
+    sig = "<br>".join(move_lines) if move_lines else "Unknown Setup"
     flat_sig = " ".join(move_lines) if move_lines else "Unknown Setup"
     return sig, flat_sig, temp_board.fen()
 
-def render_svg_board(fen, player_color, size=110):
-    """Renders a compact base64 SVG board without extra margins."""
+def render_svg_board(fen, player_color, size=78):
     b = chess.Board(fen)
     orientation = chess.WHITE if player_color == "White" else chess.BLACK
     svg_data = chess.svg.board(board=b, orientation=orientation, size=size, coordinates=False)
     b64 = base64.b64encode(svg_data.encode("utf-8")).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" style="border-radius:4px; border:1px solid #444; display:block;" />'
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:4px; border:1px solid #444; display:block;" />'
 
 def fetch_chesscom_games(username, max_games=30):
     now = datetime.datetime.now()
@@ -236,6 +251,8 @@ if "audit_results" not in st.session_state:
     st.session_state.audit_results = None
 if "audited_records_count" not in st.session_state:
     st.session_state.audited_records_count = 0
+if "selected_trees_set" not in st.session_state:
+    st.session_state.selected_trees_set = set()
 
 # --- STREAMLIT UI ---
 st.title("♟️ Chess Telemetry & Opening Leak Scanner")
@@ -271,13 +288,16 @@ if fetch_btn and username_input:
         indexed = index_games_metadata(raw_games, username_input, color_choice)
         st.session_state.indexed_games = indexed
         st.session_state.audit_results = None
+        # Default all indexed openings to selected
+        all_unique = {r["opening_tree"] for r in indexed}
+        st.session_state.selected_trees_set = set(all_unique)
 
 # --- STAGE 2: SELECTION & ANALYSIS ---
 if st.session_state.indexed_games is not None:
     indexed = st.session_state.indexed_games
 
     if len(indexed) == 0:
-        st.warning(f"No games found matching selected color.")
+        st.warning("No games found matching selected color.")
     else:
         index_df = pd.DataFrame(indexed)
         con = duckdb.connect()
@@ -296,55 +316,73 @@ if st.session_state.indexed_games is not None:
         ORDER BY count DESC
         """
         opening_stats = con.execute(stats_query).fetchall()
+        all_trees = [item[0] for item in opening_stats]
 
-        # Selection panel stays open before scan; collapses once results arrive
         expander_open = st.session_state.audit_results is None
         with st.expander("⚙️ **Step 2: Select Opening Lines to Audit**", expanded=expander_open):
-            select_all = st.checkbox("Select All Openings", value=True)
+            btn_col1, btn_col2, _ = st.columns([1.5, 1.5, 5])
+            if btn_col1.button("Select All", use_container_width=True):
+                st.session_state.selected_trees_set = set(all_trees)
+                st.rerun()
+            if btn_col2.button("Deselect All", use_container_width=True):
+                st.session_state.selected_trees_set = set()
+                st.rerun()
 
-            with st.form("audit_form"):
-                selected_trees = []
+            # Render 3 columns of compact boxed cards
+            cols = st.columns(3)
 
-                # Pack into 3 columns
-                cols = st.columns(3)
+            for idx, (tree, disp_tree, fen, p_color, cnt, pct) in enumerate(opening_stats):
+                target_col = cols[idx % 3]
+                is_selected = tree in st.session_state.selected_trees_set
 
-                for idx, (tree, disp_tree, fen, p_color, cnt, pct) in enumerate(opening_stats):
-                    target_col = cols[idx % 3]
+                border_color = "#4CAF50" if is_selected else "#383838"
+                bg_color = "rgba(76, 175, 80, 0.12)" if is_selected else "rgba(255, 255, 255, 0.03)"
+                btn_label = "✓ Included" if is_selected else "+ Click to Include"
+                btn_type = "primary" if is_selected else "secondary"
 
-                    with target_col:
-                        # Compact card container with tight text-to-board spacing
-                        st.markdown(
-                            f"""
-                            <div style="background-color: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 10px; margin-bottom: 10px;">
-                                <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;">
-                                    <div>
-                                        <div style="font-size: 15px; font-weight: 700; line-height: 1.4; white-space: pre-line; margin-bottom: 6px;">{disp_tree}</div>
-                                        <div style="font-size: 12px; color: #aaa;">{cnt} game{'s' if cnt > 1 else ''} &bull; <b>{pct}%</b></div>
+                with target_col:
+                    st.markdown(
+                        f"""
+                        <div style="border: 2px solid {border_color}; background-color: {bg_color}; border-radius: 8px; padding: 6px 10px; margin-bottom: 2px;">
+                            <div style="display: flex; align-items: center; justify-content: flex-start; gap: 10px;">
+                                <div style="flex-shrink: 0;">
+                                    {render_svg_board(fen, p_color, size=78)}
+                                </div>
+                                <div style="flex-grow: 1; min-width: 0;">
+                                    <div style="font-size: 14px; font-weight: 700; line-height: 1.25; margin-bottom: 3px;">
+                                        {disp_tree}
                                     </div>
-                                    <div style="flex-shrink: 0;">
-                                        {render_svg_board(fen, p_color, size=95)}
+                                    <div style="font-size: 11px; color: #aaa;">
+                                        {cnt} game{'s' if cnt > 1 else ''} &bull; <b>{pct}%</b>
                                     </div>
                                 </div>
                             </div>
-                            """,
-                            unsafe_allow_html=True
-                        )
-                        checked = st.checkbox("Include line", value=select_all, key=f"sel_{idx}")
-                        if checked:
-                            selected_trees.append(tree)
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
 
-                submit_audit = st.form_submit_button("Run Deep Engine Audit on Selected Lines", type="primary")
-
-                if submit_audit:
-                    if not selected_trees:
-                        st.warning("Please check at least one opening sequence.")
-                    else:
-                        filtered = [r for r in indexed if r["opening_tree"] in selected_trees]
-                        with st.spinner("Analyzing with Stockfish..."):
-                            leaks = analyze_targeted_games(filtered, username_input, min_drop, max_drop)
-                            st.session_state.audit_results = leaks
-                            st.session_state.audited_records_count = len(filtered)
+                    if st.button(btn_label, key=f"card_btn_{idx}", type=btn_type, use_container_width=True):
+                        if is_selected:
+                            st.session_state.selected_trees_set.discard(tree)
+                        else:
+                            st.session_state.selected_trees_set.add(tree)
                         st.rerun()
+
+            st.write("")
+            start_audit = st.button("Run Deep Engine Audit on Selected Lines", type="primary", use_container_width=False)
+
+            if start_audit:
+                selected_trees = list(st.session_state.selected_trees_set)
+                if not selected_trees:
+                    st.warning("Please include at least one opening line.")
+                else:
+                    filtered = [r for r in indexed if r["opening_tree"] in selected_trees]
+                    with st.spinner("Analyzing with Stockfish..."):
+                        leaks = analyze_targeted_games(filtered, username_input, min_drop, max_drop)
+                        st.session_state.audit_results = leaks
+                        st.session_state.audited_records_count = len(filtered)
+                    st.rerun()
 
 # --- STAGE 3: AUDIT RESULTS ---
 if st.session_state.audit_results is not None:
