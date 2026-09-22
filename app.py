@@ -2,12 +2,14 @@ import io
 import os
 import shutil
 import datetime
+import base64
 from urllib.parse import quote
 import requests
 import streamlit as st
 import chess
 import chess.engine
 import chess.pgn
+import chess.svg
 import duckdb
 import pandas as pd
 
@@ -52,8 +54,8 @@ def get_my_eval(info, my_color):
         return 100.0 if score.mate() > 0 else -100.0
     return (score.score() or 0) / 100.0
 
-def get_opening_signature(game, plies=4):
-    """Extracts first 2 full moves (4 plies) as the opening tree key."""
+def get_opening_signature_and_fen(game, plies=4):
+    """Extracts first 2 full moves (4 plies) and generates the resulting FEN."""
     temp_board = game.board()
     moves = list(game.mainline_moves())[:plies]
     tokens = []
@@ -62,7 +64,16 @@ def get_opening_signature(game, plies=4):
             tokens.append(f"{(idx // 2) + 1}.")
         tokens.append(temp_board.san(move))
         temp_board.push(move)
-    return " ".join(tokens) if tokens else "Unknown Setup"
+    sig = " ".join(tokens) if tokens else "Unknown Setup"
+    return sig, temp_board.fen()
+
+def render_svg_board(fen, player_color, size=170):
+    """Renders a python-chess board as an embedded base64 SVG image."""
+    b = chess.Board(fen)
+    orientation = chess.WHITE if player_color == "White" else chess.BLACK
+    svg_data = chess.svg.board(board=b, orientation=orientation, size=size)
+    b64 = base64.b64encode(svg_data.encode("utf-8")).decode("utf-8")
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" style="border-radius:6px; border:1px solid #444;" />'
 
 def fetch_chesscom_games(username, max_games=30):
     now = datetime.datetime.now()
@@ -85,7 +96,6 @@ def fetch_chesscom_games(username, max_games=30):
     return games_raw[-max_games:]
 
 def index_games_metadata(games_list, target_username, chosen_color):
-    """Indexes games and extracts opening sequences without spinning up Stockfish."""
     indexed = []
     target = target_username.lower()
 
@@ -111,7 +121,7 @@ def index_games_metadata(games_list, target_username, chosen_color):
         if chosen_color != "All" and player_color != chosen_color:
             continue
 
-        opening_tree = get_opening_signature(game, plies=4)
+        opening_tree, branch_fen = get_opening_signature_and_fen(game, plies=4)
         raw_header = game.headers.get("Opening", "")
         if raw_header and raw_header != "Unknown":
             display_label = f"{opening_tree} ({raw_header})"
@@ -127,6 +137,7 @@ def index_games_metadata(games_list, target_username, chosen_color):
             "player_color": player_color,
             "date": game.headers.get("Date", "Unknown"),
             "opening_tree": opening_tree,
+            "branch_fen": branch_fen,
             "display_label": display_label
         })
 
@@ -223,7 +234,7 @@ if "color_indexed" not in st.session_state:
 
 # --- STREAMLIT UI ---
 st.title("♟️ Chess Telemetry & Opening Leak Scanner")
-st.caption("Stage-wise opening risk profiling and targeted move analysis.")
+st.caption("Visual opening risk profiling and targeted move analysis.")
 
 # --- SIDEBAR: STAGE 1 SETUP ---
 with st.sidebar:
@@ -266,7 +277,6 @@ if st.session_state.indexed_games is not None:
     else:
         st.subheader("Step 2: Select Opening Lines to Audit")
         
-        # Calculate opening frequencies and percentages via DuckDB
         index_df = pd.DataFrame(indexed)
         con = duckdb.connect()
         con.register("index_df", index_df)
@@ -274,6 +284,8 @@ if st.session_state.indexed_games is not None:
         stats_query = """
         SELECT 
             opening_tree,
+            FIRST(branch_fen) as sample_fen,
+            FIRST(player_color) as sample_color,
             COUNT(*) AS count,
             ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS pct
         FROM index_df
@@ -282,28 +294,28 @@ if st.session_state.indexed_games is not None:
         """
         opening_stats = con.execute(stats_query).fetchall()
 
-        # Build options dictionary: label -> list of games
-        options_map = {}
-        for tree, cnt, pct in opening_stats:
-            label = f"{tree}  —  {cnt} match{'es' if cnt > 1 else ''} ({pct}%)"
-            options_map[label] = tree
-
-        c_actions, c_blank = st.columns([2, 5])
+        c_actions, _ = st.columns([2, 5])
         select_all = c_actions.checkbox("Select All Openings", value=True)
 
         with st.form("audit_form"):
+            st.write("Choose lines to analyze with Stockfish:")
             selected_labels = []
-            st.write("Choose the lines you want Stockfish to analyze:")
-            
-            # 2-column layout for clean checkboxes
-            col_a, col_b = st.columns(2)
-            cols = [col_a, col_b]
 
-            for i, (label, tree_key) in enumerate(options_map.items()):
-                target_col = cols[i % 2]
-                checked = target_col.checkbox(label, value=select_all, key=f"tree_{tree_key}")
-                if checked:
-                    selected_labels.append(tree_key)
+            for row_idx, (tree, fen, p_color, cnt, pct) in enumerate(opening_stats):
+                col_box, col_img = st.columns([3.5, 1.5])
+                
+                with col_box:
+                    st.markdown(f"### {tree}")
+                    st.write(f"**Frequency:** {cnt} match{'es' if cnt > 1 else ''} ({pct}% of sample)")
+                    checked = st.checkbox("Include this line", value=select_all, key=f"tree_{tree}_{row_idx}")
+                    if checked:
+                        selected_labels.append(tree)
+
+                with col_img:
+                    board_html = render_svg_board(fen, p_color, size=150)
+                    st.markdown(board_html, unsafe_allow_html=True)
+
+                st.markdown("<hr style='margin: 10px 0; border: 0.5px solid #333;'>", unsafe_allow_html=True)
 
             submit_audit = st.form_submit_button("Run Deep Engine Audit on Selected Lines", type="primary")
 
