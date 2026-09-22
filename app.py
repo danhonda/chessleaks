@@ -111,7 +111,7 @@ def render_svg_board(fen, player_color, size=130):
     b64 = base64.b64encode(svg_data.encode("utf-8")).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:6px; border:1px solid #555; display:block;" />'
 
-def render_interactive_board(fen, orientation="white", board_id="board_1", width=340):
+def render_interactive_board(fen, orientation="white", board_id="board_1", width=320):
     """Renders a client-side draggable chessboard loaded via CDN."""
     html_code = f"""
     <!DOCTYPE html>
@@ -158,7 +158,7 @@ def render_interactive_board(fen, orientation="white", board_id="board_1", width
     <body>
         <div id="{board_id}"></div>
         <div class="board-controls">
-            <button class="ctrl-btn" onclick="resetBoard()">↺ Reset Blunder Position</button>
+            <button class="ctrl-btn" onclick="resetBoard()">↺ Reset Position</button>
             <button class="ctrl-btn" onclick="flipBoard()">⇄ Flip</button>
         </div>
 
@@ -169,7 +169,6 @@ def render_interactive_board(fen, orientation="white", board_id="board_1", width
 
             function onDragStart(source, piece, position, orientation) {{
                 if (game.game_over()) return false;
-                // Disallow picking up pieces for wrong side
                 if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
                     (game.turn() === 'b' && piece.search(/^w/) !== -1)) {{
                     return false;
@@ -273,6 +272,7 @@ def index_games_metadata(games_list, target_username, chosen_color):
             "game_idx": idx,
             "raw_game": g,
             "parsed_game": game,
+            "game_url": g.get("url", ""),
             "white": white_player,
             "black": black_player,
             "player_color": player_color,
@@ -296,11 +296,21 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
     for i, rec in enumerate(selected_records):
         game = rec["parsed_game"]
         my_color = chess.WHITE if rec["player_color"] == "White" else chess.BLACK
-        is_flip = "false" if my_color == chess.WHITE else "true"
-        lichess_color = "white" if my_color == chess.WHITE else "black"
+        raw_game_url = rec.get("game_url", "")
 
         board = game.board()
         moves = list(game.mainline_moves())
+
+        # Build clean SAN moves string for Lichess import without noisy clocks/headers
+        san_tokens = []
+        temp_b = game.board()
+        for idx_m, m in enumerate(moves):
+            if idx_m % 2 == 0:
+                san_tokens.append(f"{(idx_m // 2) + 1}.")
+            san_tokens.append(temp_b.san(m))
+            temp_b.push(m)
+        clean_moves_str = " ".join(san_tokens)
+        encoded_clean_moves = quote(clean_moves_str)
 
         info_current = engine.analyse(board, ENGINE_LIMIT)
         prev_eval = get_my_eval(info_current, my_color)
@@ -312,11 +322,16 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
 
             if board.turn == my_color:
                 fen_before = board.fen()
-                encoded_fen = quote(fen_before)
 
-                chesscom_url = f"https://www.chess.com/analysis?fen={encoded_fen}&flip={is_flip}"
-                fen_url_slug = fen_before.replace(" ", "_")
-                lichess_url = f"https://lichess.org/analysis/{fen_url_slug}?color={lichess_color}"
+                # 1. Full Game on Chess.com
+                # Uses original game URL if available; otherwise falls back to analysis
+                if raw_game_url:
+                    chesscom_full_url = raw_game_url
+                else:
+                    chesscom_full_url = f"https://www.chess.com/analysis?pgn={encoded_clean_moves}"
+
+                # 2. Full Game on Lichess parked right at blunder ply
+                lichess_full_url = f"https://lichess.org/analysis/pgn/{encoded_clean_moves}#{ply_index}"
 
                 pv = info_current.get("pv", [])
                 best_move = board.san(pv[0]) if pv else "N/A"
@@ -349,8 +364,8 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
                         "severity": severity,
                         "badge_color": badge_color,
                         "fen_before": fen_before,
-                        "chesscom_url": chesscom_url,
-                        "lichess_url": lichess_url
+                        "chesscom_url": chesscom_full_url,
+                        "lichess_url": lichess_full_url
                     })
 
                 prev_eval = eval_after
@@ -528,7 +543,6 @@ if st.session_state.audit_results is not None:
                         col_board, col_analysis = st.columns([1.1, 1.4], gap="medium")
                         
                         with col_board:
-                            # Render live draggable board initialized at the blunder FEN
                             render_interactive_board(
                                 fen=row["fen_before"],
                                 orientation=row["color"],
@@ -553,7 +567,7 @@ if st.session_state.audit_results is not None:
                             )
                             
                             st.markdown(
-                                f"🔗 **External Replays:** [♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess Board]({row['lichess_url']})"
+                                f"🔗 **Full Game Replay:** [♟️ Chess.com Match]({row['chesscom_url']}) | [📖 Lichess @ Move {row['move_number']}]({row['lichess_url']})"
                             )
     else:
         st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns for the selected lines.")
