@@ -5,6 +5,7 @@ import base64
 from urllib.parse import quote
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import chess
 import chess.engine
 import chess.pgn
@@ -46,7 +47,7 @@ if not STOCKFISH_PATH:
     )
     st.stop()
 
-# --- CSS FOR TIGHT PADDING & LARGE READABLE CARDS ---
+# --- CSS FOR TIGHT PADDING & OPENING CARDS ---
 st.markdown("""
 <style>
 div[data-testid="stExpander"] div[data-testid="stColumn"] {
@@ -109,6 +110,108 @@ def render_svg_board(fen, player_color, size=130):
     svg_data = chess.svg.board(board=b, orientation=orientation, size=size, coordinates=False)
     b64 = base64.b64encode(svg_data.encode("utf-8")).decode("utf-8")
     return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:6px; border:1px solid #555; display:block;" />'
+
+def render_interactive_board(fen, orientation="white", board_id="board_1", width=340):
+    """Renders a client-side draggable chessboard loaded via CDN."""
+    html_code = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css">
+        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
+        <style>
+            body {{
+                margin: 0;
+                padding: 0;
+                background-color: transparent;
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+            }}
+            #{board_id} {{
+                width: {width}px;
+                border-radius: 6px;
+                overflow: hidden;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+            }}
+            .board-controls {{
+                margin-top: 8px;
+                display: flex;
+                gap: 8px;
+            }}
+            .ctrl-btn {{
+                background: #2b2b2b;
+                color: #e0e0e0;
+                border: 1px solid #555;
+                padding: 4px 10px;
+                border-radius: 4px;
+                font-size: 11px;
+                cursor: pointer;
+            }}
+            .ctrl-btn:hover {{
+                background: #3d3d3d;
+            }}
+        </style>
+    </head>
+    <body>
+        <div id="{board_id}"></div>
+        <div class="board-controls">
+            <button class="ctrl-btn" onclick="resetBoard()">↺ Reset Blunder Position</button>
+            <button class="ctrl-btn" onclick="flipBoard()">⇄ Flip</button>
+        </div>
+
+        <script>
+            var startFen = '{fen}';
+            var game = new Chess(startFen);
+            var board = null;
+
+            function onDragStart(source, piece, position, orientation) {{
+                if (game.game_over()) return false;
+                // Disallow picking up pieces for wrong side
+                if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
+                    (game.turn() === 'b' && piece.search(/^w/) !== -1)) {{
+                    return false;
+                }}
+            }}
+
+            function onDrop(source, target) {{
+                var move = game.move({{
+                    from: source,
+                    to: target,
+                    promotion: 'q'
+                }});
+                if (move === null) return 'snapback';
+            }}
+
+            function onSnapEnd() {{
+                board.position(game.fen());
+            }}
+
+            board = Chessboard('{board_id}', {{
+                draggable: true,
+                position: startFen,
+                orientation: '{orientation.lower()}',
+                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{{piece}}.png',
+                onDragStart: onDragStart,
+                onDrop: onDrop,
+                onSnapEnd: onSnapEnd
+            }});
+
+            function resetBoard() {{
+                game.load(startFen);
+                board.position(startFen);
+            }}
+
+            function flipBoard() {{
+                board.flip();
+            }}
+        </script>
+    </body>
+    </html>
+    """
+    components.html(html_code, height=width + 65)
 
 def fetch_chesscom_games(username, max_games=100):
     headers = {"User-Agent": f"ChessLeakScanner/7.0 ({username}@portfolio.com)"}
@@ -211,10 +314,7 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
                 fen_before = board.fen()
                 encoded_fen = quote(fen_before)
 
-                # 1. Chess.com Analysis Link
                 chesscom_url = f"https://www.chess.com/analysis?fen={encoded_fen}&flip={is_flip}"
-                
-                # 2. Reliable Lichess FEN Link (spaces replaced with underscores per Lichess API)
                 fen_url_slug = fen_before.replace(" ", "_")
                 lichess_url = f"https://lichess.org/analysis/{fen_url_slug}?color={lichess_color}"
 
@@ -248,6 +348,7 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
                         "eval_drop": eval_drop,
                         "severity": severity,
                         "badge_color": badge_color,
+                        "fen_before": fen_before,
                         "chesscom_url": chesscom_url,
                         "lichess_url": lichess_url
                     })
@@ -276,7 +377,7 @@ if "selected_trees_set" not in st.session_state:
 
 # --- STREAMLIT UI ---
 st.title("♟️ Chess Telemetry & Opening Leak Scanner")
-st.caption("Visual opening frequency breakdown and game-by-game blunder audit.")
+st.caption("Visual opening frequency breakdown and interactive game-by-game blunder audit.")
 
 # --- SIDEBAR: DATA INGESTION ---
 with st.sidebar:
@@ -413,22 +514,46 @@ if st.session_state.audit_results is not None:
         games_with_flaws = con.execute("SELECT COUNT(DISTINCT game_title) FROM leaks_df").fetchone()[0]
         k4.metric("Matches with Errors", games_with_flaws)
 
-        # Game-by-Game Output
+        # Interactive Game-by-Game Output
         st.subheader("🎮 Game-by-Game Breakdown")
         grouped_games = leaks_df.groupby("game_title")
 
+        card_counter = 0
         for game_title, group in grouped_games:
             opening_in_game = group.iloc[0]["opening_tree"]
             with st.expander(f"📌 **{game_title}** — [{opening_in_game}] — {len(group)} mistake(s)", expanded=True):
                 for _, row in group.iterrows():
-                    c_tag, c_mv, c_best, c_loss, c_links = st.columns([1.2, 1.4, 1.4, 1.4, 3.2])
-                    c_tag.markdown(
-                        f"<span style='background-color:{row['badge_color']}; color:black; font-weight:bold; padding:2px 8px; border-radius:4px;'>{row['severity']}</span>",
-                        unsafe_allow_html=True
-                    )
-                    c_mv.markdown(f"**Move {row['move_number']}:** `{row['played_move']}`")
-                    c_best.markdown(f"**Best:** `{row['engine_best']}`")
-                    c_loss.markdown(f"**Drop:** `-{row['eval_drop']}`")
-                    c_links.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess Board]({row['lichess_url']})")
+                    card_counter += 1
+                    with st.container(border=True):
+                        col_board, col_analysis = st.columns([1.1, 1.4], gap="medium")
+                        
+                        with col_board:
+                            # Render live draggable board initialized at the blunder FEN
+                            render_interactive_board(
+                                fen=row["fen_before"],
+                                orientation=row["color"],
+                                board_id=f"drag_board_{card_counter}",
+                                width=320
+                            )
+
+                        with col_analysis:
+                            st.markdown(
+                                f"<span style='background-color:{row['badge_color']}; color:black; font-weight:bold; padding:3px 10px; border-radius:4px;'>{row['severity']}</span>",
+                                unsafe_allow_html=True
+                            )
+                            st.markdown(f"### Move {row['move_number']}")
+                            st.error(f"You played: **`{row['played_move']}`** (Loss: -{row['eval_drop']} pawns)")
+                            st.success(f"Stockfish recommends: **`{row['engine_best']}`**")
+                            
+                            st.markdown(
+                                f"""
+                                **Opening Line:** `{row['opening_tree']}`  
+                                **Perspective:** Playing as **{row['color']}**  
+                                """
+                            )
+                            
+                            st.markdown(
+                                f"🔗 **External Replays:** [♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess Board]({row['lichess_url']})"
+                            )
     else:
         st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns for the selected lines.")
