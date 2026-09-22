@@ -47,6 +47,31 @@ if not STOCKFISH_PATH:
     )
     st.stop()
 
+# --- CSS FOR TIGHT PADDING & LARGE READABLE CARDS ---
+st.markdown("""
+<style>
+div[data-testid="stExpander"] div[data-testid="stColumn"] {
+    padding: 2px 5px !important;
+}
+div[data-testid="stExpander"] div[data-testid="stVerticalBlockBorderWrapper"] {
+    padding: 8px 12px !important;
+    margin-bottom: 6px !important;
+}
+.large-move-text {
+    font-size: 19px !important;
+    font-weight: 800 !important;
+    line-height: 1.35 !important;
+    letter-spacing: -0.3px;
+    margin-bottom: 4px;
+}
+.large-stat-text {
+    font-size: 14px !important;
+    color: #9ca3af !important;
+    margin-bottom: 8px;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- HELPER FUNCTIONS ---
 def get_my_eval(info, my_color):
     score = info["score"].white() if my_color == chess.WHITE else info["score"].black()
@@ -55,7 +80,6 @@ def get_my_eval(info, my_color):
     return (score.score() or 0) / 100.0
 
 def get_opening_signature_and_fen(game, plies=4):
-    """Extracts first 2 moves on two distinct rows (e.g. '1. e4 e5' and '2. d4 d5')."""
     temp_board = game.board()
     moves = list(game.mainline_moves())[:plies]
     
@@ -80,12 +104,12 @@ def get_opening_signature_and_fen(game, plies=4):
     
     return line1, line2, flat_sig, temp_board.fen()
 
-def render_svg_board(fen, player_color, size=80):
+def render_svg_board(fen, player_color, size=130):
     b = chess.Board(fen)
     orientation = chess.WHITE if player_color == "White" else chess.BLACK
     svg_data = chess.svg.board(board=b, orientation=orientation, size=size, coordinates=False)
     b64 = base64.b64encode(svg_data.encode("utf-8")).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:4px; border:1px solid #555; display:block;" />'
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:6px; border:1px solid #555; display:block;" />'
 
 def fetch_chesscom_games(username, max_games=30):
     now = datetime.datetime.now()
@@ -324,22 +348,25 @@ if st.session_state.indexed_games is not None:
 
                 with target_col:
                     with st.container(border=True):
-                        # Row with board on left and move text on right
-                        c_img, c_text = st.columns([1, 2.2])
+                        # Tight 1.15 : 1.85 proportion so board and text fill the container
+                        c_img, c_text = st.columns([1.15, 1.85], gap="small")
                         with c_img:
-                            st.markdown(render_svg_board(fen, p_color, size=80), unsafe_allow_html=True)
+                            st.markdown(render_svg_board(fen, p_color, size=130), unsafe_allow_html=True)
                         with c_text:
-                            st.markdown(f"**{l1}**<br>**{l2}**", unsafe_allow_html=True)
-                            st.caption(f"{cnt} games • **{pct}%**")
-
-                        # Single integrated checkbox inside the exact same border box
-                        checked = st.checkbox("Include this line", value=is_selected, key=f"chk_tree_{idx}")
-                        if checked and not is_selected:
-                            st.session_state.selected_trees_set.add(tree)
-                            st.rerun()
-                        elif not checked and is_selected:
-                            st.session_state.selected_trees_set.discard(tree)
-                            st.rerun()
+                            st.markdown(
+                                f"""
+                                <div class="large-move-text">{l1}<br>{l2}</div>
+                                <div class="large-stat-text">{cnt} game{'s' if cnt > 1 else ''} &bull; <b>{pct}%</b></div>
+                                """,
+                                unsafe_allow_html=True
+                            )
+                            checked = st.checkbox("Include Line", value=is_selected, key=f"chk_tree_{idx}")
+                            if checked and not is_selected:
+                                st.session_state.selected_trees_set.add(tree)
+                                st.rerun()
+                            elif not checked and is_selected:
+                                st.session_state.selected_trees_set.discard(tree)
+                                st.rerun()
 
             st.write("")
             start_audit = st.button("Run Deep Engine Audit on Selected Lines", type="primary")
