@@ -38,7 +38,7 @@ STOCKFISH_PATH = find_stockfish()
 MAX_MOVE_NUMBER = 15
 ENGINE_LIMIT = chess.engine.Limit(depth=10)
 
-st.set_page_config(page_title="Chess Opening Leak & Risk Detector", layout="wide")
+st.set_page_config(page_title="Chess Telemetry & Opening Leak Scanner", layout="wide")
 
 if not STOCKFISH_PATH:
     st.error(
@@ -67,7 +67,7 @@ def get_opening_signature_and_fen(game, plies=4):
     sig = " ".join(tokens) if tokens else "Unknown Setup"
     return sig, temp_board.fen()
 
-def render_svg_board(fen, player_color, size=170):
+def render_svg_board(fen, player_color, size=150):
     """Renders a python-chess board as an embedded base64 SVG image."""
     b = chess.Board(fen)
     orientation = chess.WHITE if player_color == "White" else chess.BLACK
@@ -198,9 +198,8 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
                         badge_color = "#F0D000"
 
                     leaks.append({
+                        "game_title": f"Game {rec['game_idx'] + 1}: {rec['white']} vs {rec['black']} ({rec['date']})",
                         "opening_tree": rec["opening_tree"],
-                        "opening_display": rec["display_label"],
-                        "matchup": f"{rec['white']} vs {rec['black']} ({rec['date']})",
                         "color": rec["player_color"],
                         "move_number": move_num,
                         "played_move": played_move,
@@ -234,7 +233,7 @@ if "color_indexed" not in st.session_state:
 
 # --- STREAMLIT UI ---
 st.title("♟️ Chess Telemetry & Opening Leak Scanner")
-st.caption("Visual opening risk profiling and targeted move analysis.")
+st.caption("Visual opening risk profiling and game-by-game blunder breakdown.")
 
 # --- SIDEBAR: STAGE 1 SETUP ---
 with st.sidebar:
@@ -339,14 +338,16 @@ if st.session_state.indexed_games is not None:
                     con.register("leaks_df", leaks_df)
 
                     # KPI Cards
-                    k1, k2, k3 = st.columns(3)
+                    k1, k2, k3, k4 = st.columns(4)
                     k1.metric("Audited Matches", len(filtered_records))
                     k2.metric("Flagged Mistakes", len(leaks_data))
                     avg_lost = con.execute("SELECT ROUND(AVG(eval_drop), 2) FROM leaks_df").fetchone()[0]
                     k3.metric("Avg Pawn Loss / Error", f"-{avg_lost}")
+                    games_with_flaws = con.execute("SELECT COUNT(DISTINCT game_title) FROM leaks_df").fetchone()[0]
+                    k4.metric("Games with Mistakes", games_with_flaws)
 
                     st.markdown("---")
-                    st.subheader("📊 Vulnerability Summary by Opening (DuckDB)")
+                    st.subheader("📊 Opening Vulnerability Summary (DuckDB)")
 
                     summary_query = """
                     SELECT 
@@ -362,23 +363,23 @@ if st.session_state.indexed_games is not None:
                     st.dataframe(con.execute(summary_query).df(), use_container_width=True, hide_index=True)
 
                     st.markdown("---")
-                    st.subheader("📂 Move-by-Move Inspection")
+                    st.subheader("🎮 Game-by-Game Audit Breakdown")
 
-                    grouped = leaks_df.groupby("opening_tree")
-                    sorted_groups = sorted(grouped, key=lambda x: len(x[1]), reverse=True)
+                    # Group results strictly by match
+                    grouped_games = leaks_df.groupby("game_title")
 
-                    for tree_name, group in sorted_groups:
-                        with st.expander(f"📁 **Line: {tree_name}** — {len(group)} mistake(s)", expanded=True):
+                    for game_title, group in grouped_games:
+                        opening_in_game = group.iloc[0]["opening_tree"]
+                        with st.expander(f"📌 **{game_title}** — [{opening_in_game}] — {len(group)} mistake(s)", expanded=True):
                             for _, row in group.iterrows():
-                                c_tag, c_match, c_mv, c_best, c_loss, c_links = st.columns([1.2, 2.5, 1.2, 1.2, 1.2, 2.8])
+                                c_tag, c_mv, c_best, c_loss, c_links = st.columns([1.2, 1.5, 1.5, 1.5, 3.2])
                                 c_tag.markdown(
                                     f"<span style='background-color:{row['badge_color']}; color:black; font-weight:bold; padding:2px 8px; border-radius:4px;'>{row['severity']}</span>",
                                     unsafe_allow_html=True
                                 )
-                                c_match.caption(row["matchup"])
                                 c_mv.markdown(f"**Move {row['move_number']}:** `{row['played_move']}`")
                                 c_best.markdown(f"**Best:** `{row['engine_best']}`")
                                 c_loss.markdown(f"**Drop:** `-{row['eval_drop']}`")
-                                c_links.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess]({row['lichess_url']})")
+                                c_links.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess Move]({row['lichess_url']})")
                 else:
                     st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns for the selected lines.")
