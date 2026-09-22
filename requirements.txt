@@ -1,0 +1,5 @@
+streamlit
+requests
+python-chess
+duckdb
+pandas
