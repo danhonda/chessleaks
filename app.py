@@ -11,20 +11,40 @@ import chess.pgn
 import duckdb
 import pandas as pd
 
-# --- CONFIGURATION ---
-# Checks for Linux/Cloud system binary first; falls back to your local Windows path
-STOCKFISH_PATH = shutil.which("stockfish") or r"C:/Users/danho/Downloads/stockfish/stockfish-windows-x86-64-universal.exe"
+# --- CONFIGURATION & DYNAMIC PATH RESOLUTION ---
+def find_stockfish():
+    # 1. Standard Debian/Ubuntu Linux apt paths (Streamlit Cloud)
+    cloud_paths = [
+        "/usr/games/stockfish",
+        "/usr/bin/stockfish",
+        "/usr/local/bin/stockfish"
+    ]
+    for path in cloud_paths:
+        if os.path.exists(path):
+            return path
 
+    # 2. General environment PATH
+    which_path = shutil.which("stockfish")
+    if which_path:
+        return which_path
+
+    # 3. Local Windows fallback
+    windows_path = r"C:/Users/danho/Downloads/stockfish/stockfish-windows-x86-64-universal.exe"
+    if os.path.exists(windows_path):
+        return windows_path
+
+    return None
+
+STOCKFISH_PATH = find_stockfish()
 MAX_MOVE_NUMBER = 15
 ENGINE_LIMIT = chess.engine.Limit(depth=10)
 
 st.set_page_config(page_title="Chess Telemetry & Leak Scanner", layout="wide")
 
-# Verify engine executable exists before starting
-if not os.path.exists(STOCKFISH_PATH) and not shutil.which("stockfish"):
+if not STOCKFISH_PATH:
     st.error(
-        f"Stockfish engine binary not found at '{STOCKFISH_PATH}'. "
-        "If deploying on Streamlit Cloud, make sure `stockfish` is listed in your `packages.txt` file."
+        "Stockfish engine binary could not be found. "
+        "If running on Streamlit Cloud, make sure `packages.txt` exists in your repository root containing `stockfish`."
     )
     st.stop()
 
