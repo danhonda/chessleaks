@@ -5,7 +5,6 @@ import base64
 from urllib.parse import quote
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 import chess
 import chess.engine
 import chess.pgn
@@ -47,7 +46,7 @@ if not STOCKFISH_PATH:
     )
     st.stop()
 
-# --- CSS FOR TIGHT PADDING & OPENING CARDS ---
+# --- CSS STYLING ---
 st.markdown("""
 <style>
 div[data-testid="stExpander"] div[data-testid="stColumn"] {
@@ -68,6 +67,12 @@ div[data-testid="stExpander"] div[data-testid="stVerticalBlockBorderWrapper"] {
     font-size: 14px !important;
     color: #9ca3af !important;
     margin-bottom: 8px;
+}
+.board-label {
+    text-align: center;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -104,113 +109,24 @@ def get_opening_signature_and_fen(game, plies=4):
     
     return line1, line2, flat_sig, temp_board.fen()
 
-def render_svg_board(fen, player_color, size=130):
+def render_svg_board(fen, player_color, arrow_move=None, arrow_color="#ef4444cc", size=130):
+    """Renders a static chess board with optional colored directional arrows."""
     b = chess.Board(fen)
     orientation = chess.WHITE if player_color == "White" else chess.BLACK
-    svg_data = chess.svg.board(board=b, orientation=orientation, size=size, coordinates=False)
+    
+    arrows = []
+    if arrow_move:
+        arrows = [chess.svg.Arrow(arrow_move.from_square, arrow_move.to_square, color=arrow_color)]
+    
+    svg_data = chess.svg.board(
+        board=b,
+        arrows=arrows,
+        orientation=orientation,
+        size=size,
+        coordinates=False
+    )
     b64 = base64.b64encode(svg_data.encode("utf-8")).decode("utf-8")
-    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:6px; border:1px solid #555; display:block;" />'
-
-def render_interactive_board(fen, orientation="white", board_id="board_1", width=320):
-    """Renders a client-side draggable chessboard loaded via CDN."""
-    html_code = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css">
-        <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"></script>
-        <style>
-            body {{
-                margin: 0;
-                padding: 0;
-                background-color: transparent;
-                display: flex;
-                flex-direction: column;
-                align-items: flex-start;
-            }}
-            #{board_id} {{
-                width: {width}px;
-                border-radius: 6px;
-                overflow: hidden;
-                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
-            }}
-            .board-controls {{
-                margin-top: 8px;
-                display: flex;
-                gap: 8px;
-            }}
-            .ctrl-btn {{
-                background: #2b2b2b;
-                color: #e0e0e0;
-                border: 1px solid #555;
-                padding: 4px 10px;
-                border-radius: 4px;
-                font-size: 11px;
-                cursor: pointer;
-            }}
-            .ctrl-btn:hover {{
-                background: #3d3d3d;
-            }}
-        </style>
-    </head>
-    <body>
-        <div id="{board_id}"></div>
-        <div class="board-controls">
-            <button class="ctrl-btn" onclick="resetBoard()">↺ Reset Position</button>
-            <button class="ctrl-btn" onclick="flipBoard()">⇄ Flip</button>
-        </div>
-
-        <script>
-            var startFen = '{fen}';
-            var game = new Chess(startFen);
-            var board = null;
-
-            function onDragStart(source, piece, position, orientation) {{
-                if (game.game_over()) return false;
-                if ((game.turn() === 'w' && piece.search(/^b/) !== -1) ||
-                    (game.turn() === 'b' && piece.search(/^w/) !== -1)) {{
-                    return false;
-                }}
-            }}
-
-            function onDrop(source, target) {{
-                var move = game.move({{
-                    from: source,
-                    to: target,
-                    promotion: 'q'
-                }});
-                if (move === null) return 'snapback';
-            }}
-
-            function onSnapEnd() {{
-                board.position(game.fen());
-            }}
-
-            board = Chessboard('{board_id}', {{
-                draggable: true,
-                position: startFen,
-                orientation: '{orientation.lower()}',
-                pieceTheme: 'https://chessboardjs.com/img/chesspieces/wikipedia/{{piece}}.png',
-                onDragStart: onDragStart,
-                onDrop: onDrop,
-                onSnapEnd: onSnapEnd
-            }});
-
-            function resetBoard() {{
-                game.load(startFen);
-                board.position(startFen);
-            }}
-
-            function flipBoard() {{
-                board.flip();
-            }}
-        </script>
-    </body>
-    </html>
-    """
-    components.html(html_code, height=width + 65)
+    return f'<img src="data:image/svg+xml;base64,{b64}" width="{size}" height="{size}" style="border-radius:6px; border:1px solid #555; display:block; margin: 0 auto;" />'
 
 def fetch_chesscom_games(username, max_games=100):
     headers = {"User-Agent": f"ChessLeakScanner/7.0 ({username}@portfolio.com)"}
@@ -301,7 +217,6 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
         board = game.board()
         moves = list(game.mainline_moves())
 
-        # Build clean SAN moves string for Lichess import without noisy clocks/headers
         san_tokens = []
         temp_b = game.board()
         for idx_m, m in enumerate(moves):
@@ -323,19 +238,18 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
             if board.turn == my_color:
                 fen_before = board.fen()
 
-                # 1. Full Game on Chess.com
-                # Uses original game URL if available; otherwise falls back to analysis
+                # Full game replay links
                 if raw_game_url:
                     chesscom_full_url = raw_game_url
                 else:
                     chesscom_full_url = f"https://www.chess.com/analysis?pgn={encoded_clean_moves}"
 
-                # 2. Full Game on Lichess parked right at blunder ply
                 lichess_full_url = f"https://lichess.org/analysis/pgn/{encoded_clean_moves}#{ply_index}"
 
                 pv = info_current.get("pv", [])
-                best_move = board.san(pv[0]) if pv else "N/A"
-                played_move = board.san(move)
+                best_move_obj = pv[0] if pv else None
+                best_move_san = board.san(best_move_obj) if best_move_obj else "N/A"
+                played_move_san = board.san(move)
 
                 board.push(move)
                 info_next = engine.analyse(board, ENGINE_LIMIT)
@@ -358,8 +272,10 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
                         "opening_tree": rec["opening_tree"],
                         "color": rec["player_color"],
                         "move_number": move_num,
-                        "played_move": played_move,
-                        "engine_best": best_move,
+                        "played_move_san": played_move_san,
+                        "played_move_obj": move,
+                        "engine_best_san": best_move_san,
+                        "engine_best_obj": best_move_obj,
                         "eval_drop": eval_drop,
                         "severity": severity,
                         "badge_color": badge_color,
@@ -392,7 +308,7 @@ if "selected_trees_set" not in st.session_state:
 
 # --- STREAMLIT UI ---
 st.title("♟️ Chess Telemetry & Opening Leak Scanner")
-st.caption("Visual opening frequency breakdown and interactive game-by-game blunder audit.")
+st.caption("Visual opening frequency breakdown and dual-board move analysis.")
 
 # --- SIDEBAR: DATA INGESTION ---
 with st.sidebar:
@@ -529,45 +445,59 @@ if st.session_state.audit_results is not None:
         games_with_flaws = con.execute("SELECT COUNT(DISTINCT game_title) FROM leaks_df").fetchone()[0]
         k4.metric("Matches with Errors", games_with_flaws)
 
-        # Interactive Game-by-Game Output
+        # Game-by-Game Output with Side-by-Side Static Boards
         st.subheader("🎮 Game-by-Game Breakdown")
         grouped_games = leaks_df.groupby("game_title")
 
-        card_counter = 0
         for game_title, group in grouped_games:
             opening_in_game = group.iloc[0]["opening_tree"]
             with st.expander(f"📌 **{game_title}** — [{opening_in_game}] — {len(group)} mistake(s)", expanded=True):
                 for _, row in group.iterrows():
-                    card_counter += 1
                     with st.container(border=True):
-                        col_board, col_analysis = st.columns([1.1, 1.4], gap="medium")
+                        col_played, col_best, col_meta = st.columns([1, 1, 1.2], gap="medium")
                         
-                        with col_board:
-                            render_interactive_board(
+                        # Image 1: Played move with Red Arrow
+                        with col_played:
+                            st.markdown("<div class='board-label' style='color:#ef4444;'>❌ Played Move</div>", unsafe_allow_html=True)
+                            board_html_played = render_svg_board(
                                 fen=row["fen_before"],
-                                orientation=row["color"],
-                                board_id=f"drag_board_{card_counter}",
-                                width=320
+                                player_color=row["color"],
+                                arrow_move=row["played_move_obj"],
+                                arrow_color="#ef4444cc",
+                                size=220
                             )
+                            st.markdown(board_html_played, unsafe_allow_html=True)
+                            st.caption(f"<div style='text-align:center;'>Played: <b>{row['played_move_san']}</b></div>", unsafe_allow_html=True)
 
-                        with col_analysis:
+                        # Image 2: Best move with Green Arrow
+                        with col_best:
+                            st.markdown("<div class='board-label' style='color:#22c55e;'>✅ Stockfish Recommended</div>", unsafe_allow_html=True)
+                            board_html_best = render_svg_board(
+                                fen=row["fen_before"],
+                                player_color=row["color"],
+                                arrow_move=row["engine_best_obj"],
+                                arrow_color="#22c55ecc",
+                                size=220
+                            )
+                            st.markdown(board_html_best, unsafe_allow_html=True)
+                            st.caption(f"<div style='text-align:center;'>Best: <b>{row['engine_best_san']}</b></div>", unsafe_allow_html=True)
+
+                        # Right metadata column
+                        with col_meta:
                             st.markdown(
                                 f"<span style='background-color:{row['badge_color']}; color:black; font-weight:bold; padding:3px 10px; border-radius:4px;'>{row['severity']}</span>",
                                 unsafe_allow_html=True
                             )
                             st.markdown(f"### Move {row['move_number']}")
-                            st.error(f"You played: **`{row['played_move']}`** (Loss: -{row['eval_drop']} pawns)")
-                            st.success(f"Stockfish recommends: **`{row['engine_best']}`**")
-                            
+                            st.error(f"Loss: -{row['eval_drop']} pawns")
                             st.markdown(
                                 f"""
-                                **Opening Line:** `{row['opening_tree']}`  
+                                **Line:** `{row['opening_tree']}`  
                                 **Perspective:** Playing as **{row['color']}**  
                                 """
                             )
-                            
                             st.markdown(
-                                f"🔗 **Full Game Replay:** [♟️ Chess.com Match]({row['chesscom_url']}) | [📖 Lichess @ Move {row['move_number']}]({row['lichess_url']})"
+                                f"🔗 **Full Replay:** [♟️ Chess.com Match]({row['chesscom_url']}) | [📖 Lichess @ Move {row['move_number']}]({row['lichess_url']})"
                             )
     else:
         st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns for the selected lines.")
