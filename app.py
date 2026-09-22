@@ -128,7 +128,6 @@ def fetch_chesscom_games(username, max_games=100):
         return []
 
     collected_games = []
-    # Step backwards through monthly archives to cross month boundaries
     for month_url in reversed(archives):
         m_resp = requests.get(month_url, headers=headers)
         if m_resp.status_code == 200:
@@ -193,14 +192,12 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
 
     for i, rec in enumerate(selected_records):
         game = rec["parsed_game"]
-        pgn_text = rec["raw_game"].get("pgn", "")
         my_color = chess.WHITE if rec["player_color"] == "White" else chess.BLACK
         is_flip = "false" if my_color == chess.WHITE else "true"
+        lichess_color = "white" if my_color == chess.WHITE else "black"
 
         board = game.board()
         moves = list(game.mainline_moves())
-        clean_pgn = pgn_text.replace("\r\n", " ").replace("\n", " ").strip()
-        encoded_pgn = quote(clean_pgn)
 
         info_current = engine.analyse(board, ENGINE_LIMIT)
         prev_eval = get_my_eval(info_current, my_color)
@@ -214,8 +211,12 @@ def analyze_targeted_games(selected_records, target_username, min_drop, max_drop
                 fen_before = board.fen()
                 encoded_fen = quote(fen_before)
 
+                # 1. Chess.com Analysis Link
                 chesscom_url = f"https://www.chess.com/analysis?fen={encoded_fen}&flip={is_flip}"
-                lichess_url = f"https://lichess.org/analysis/pgn/{encoded_pgn}#{ply_index}"
+                
+                # 2. Reliable Lichess FEN Link (spaces replaced with underscores per Lichess API)
+                fen_url_slug = fen_before.replace(" ", "_")
+                lichess_url = f"https://lichess.org/analysis/{fen_url_slug}?color={lichess_color}"
 
                 pv = info_current.get("pv", [])
                 best_move = board.san(pv[0]) if pv else "N/A"
@@ -428,6 +429,6 @@ if st.session_state.audit_results is not None:
                     c_mv.markdown(f"**Move {row['move_number']}:** `{row['played_move']}`")
                     c_best.markdown(f"**Best:** `{row['engine_best']}`")
                     c_loss.markdown(f"**Drop:** `-{row['eval_drop']}`")
-                    c_links.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess Move]({row['lichess_url']})")
+                    c_links.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess Board]({row['lichess_url']})")
     else:
         st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns for the selected lines.")
