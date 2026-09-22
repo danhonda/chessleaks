@@ -11,9 +11,8 @@ import chess.pgn
 import duckdb
 import pandas as pd
 
-# --- CONFIGURATION & DYNAMIC PATH RESOLUTION ---
+# --- CONFIGURATION & PATH RESOLUTION ---
 def find_stockfish():
-    # 1. Standard Debian/Ubuntu Linux apt paths (Streamlit Cloud)
     cloud_paths = [
         "/usr/games/stockfish",
         "/usr/bin/stockfish",
@@ -23,12 +22,10 @@ def find_stockfish():
         if os.path.exists(path):
             return path
 
-    # 2. General environment PATH
     which_path = shutil.which("stockfish")
     if which_path:
         return which_path
 
-    # 3. Local Windows fallback
     windows_path = r"C:/Users/danho/Downloads/stockfish/stockfish-windows-x86-64-universal.exe"
     if os.path.exists(windows_path):
         return windows_path
@@ -39,12 +36,12 @@ STOCKFISH_PATH = find_stockfish()
 MAX_MOVE_NUMBER = 15
 ENGINE_LIMIT = chess.engine.Limit(depth=10)
 
-st.set_page_config(page_title="Chess Telemetry & Leak Scanner", layout="wide")
+st.set_page_config(page_title="Chess Opening Leak & Risk Detector", layout="wide")
 
 if not STOCKFISH_PATH:
     st.error(
         "Stockfish engine binary could not be found. "
-        "If running on Streamlit Cloud, make sure `packages.txt` exists in your repository root containing `stockfish`."
+        "If running on Streamlit Cloud, make sure packages.txt exists containing stockfish."
     )
     st.stop()
 
@@ -55,13 +52,25 @@ def get_my_eval(info, my_color):
         return 100.0 if score.mate() > 0 else -100.0
     return (score.score() or 0) / 100.0
 
-def fetch_chesscom_games(username, max_games=20):
+def get_opening_signature(game, plies=4):
+    """Extracts first 2 full moves (4 plies) as the opening tree key."""
+    temp_board = game.board()
+    moves = list(game.mainline_moves())[:plies]
+    tokens = []
+    for idx, move in enumerate(moves):
+        if idx % 2 == 0:
+            tokens.append(f"{(idx // 2) + 1}.")
+        tokens.append(temp_board.san(move))
+        temp_board.push(move)
+    return " ".join(tokens) if tokens else "Unknown Setup"
+
+def fetch_chesscom_games(username, max_games=30):
     now = datetime.datetime.now()
     year = now.strftime("%Y")
     month = now.strftime("%m")
     
     url = f"https://api.chess.com/pub/player/{username.lower()}/games/{year}/{month}"
-    headers = {"User-Agent": f"ChessLeakScanner/2.0 ({username}@portfolio.com)"}
+    headers = {"User-Agent": f"ChessLeakScanner/4.0 ({username}@portfolio.com)"}
     
     resp = requests.get(url, headers=headers)
     if resp.status_code == 404:
@@ -75,13 +84,10 @@ def fetch_chesscom_games(username, max_games=20):
     games_raw = data.get("games", [])
     return games_raw[-max_games:]
 
-def analyze_games(games_list, target_username, min_drop, max_drop):
-    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
-    engine.configure({"Threads": 2, "Hash": 128})
-
-    leaks = []
-    progress_bar = st.progress(0, text="Evaluating telemetry...")
-    total = len(games_list)
+def index_games_metadata(games_list, target_username, chosen_color):
+    """Indexes games and extracts opening sequences without spinning up Stockfish."""
+    indexed = []
+    target = target_username.lower()
 
     for idx, g in enumerate(games_list):
         pgn_text = g.get("pgn")
@@ -94,25 +100,54 @@ def analyze_games(games_list, target_username, min_drop, max_drop):
 
         white_player = game.headers.get("White", "Unknown")
         black_player = game.headers.get("Black", "Unknown")
-        target = target_username.lower()
 
         if white_player.lower() == target:
-            my_color = chess.WHITE
-            color_str = "White"
-            is_flip = "false"
+            player_color = "White"
         elif black_player.lower() == target:
-            my_color = chess.BLACK
-            color_str = "Black"
-            is_flip = "true"
+            player_color = "Black"
         else:
             continue
 
+        if chosen_color != "All" and player_color != chosen_color:
+            continue
+
+        opening_tree = get_opening_signature(game, plies=4)
+        raw_header = game.headers.get("Opening", "")
+        if raw_header and raw_header != "Unknown":
+            display_label = f"{opening_tree} ({raw_header})"
+        else:
+            display_label = opening_tree
+
+        indexed.append({
+            "game_idx": idx,
+            "raw_game": g,
+            "parsed_game": game,
+            "white": white_player,
+            "black": black_player,
+            "player_color": player_color,
+            "date": game.headers.get("Date", "Unknown"),
+            "opening_tree": opening_tree,
+            "display_label": display_label
+        })
+
+    return indexed
+
+def analyze_targeted_games(selected_records, target_username, min_drop, max_drop):
+    engine = chess.engine.SimpleEngine.popen_uci(STOCKFISH_PATH)
+    engine.configure({"Threads": 2, "Hash": 128})
+
+    leaks = []
+    total = len(selected_records)
+    progress_bar = st.progress(0, text="Auditing selected opening lines...")
+
+    for i, rec in enumerate(selected_records):
+        game = rec["parsed_game"]
+        pgn_text = rec["raw_game"].get("pgn", "")
+        my_color = chess.WHITE if rec["player_color"] == "White" else chess.BLACK
+        is_flip = "false" if my_color == chess.WHITE else "true"
+
         board = game.board()
         moves = list(game.mainline_moves())
-        opening_name = game.headers.get("Opening", "Standard Opening")
-        date_played = game.headers.get("Date", "Unknown")
-
-        # Clean PGN string for URL transmission
         clean_pgn = pgn_text.replace("\r\n", " ").replace("\n", " ").strip()
         encoded_pgn = quote(clean_pgn)
 
@@ -125,16 +160,11 @@ def analyze_games(games_list, target_username, min_drop, max_drop):
                 break
 
             if board.turn == my_color:
-                # Capture exact board state before the blunder
                 fen_before = board.fen()
                 encoded_fen = quote(fen_before)
 
-                # 1. Chess.com link (exact FEN board state flipped to player perspective)
                 chesscom_url = f"https://www.chess.com/analysis?fen={encoded_fen}&flip={is_flip}"
-                
-                # 2. Lichess link (loads full game history and parks right at the blunder ply)
-                target_ply = ply_index
-                lichess_url = f"https://lichess.org/analysis/pgn/{encoded_pgn}#{target_ply}"
+                lichess_url = f"https://lichess.org/analysis/pgn/{encoded_pgn}#{ply_index}"
 
                 pv = info_current.get("pv", [])
                 best_move = board.san(pv[0]) if pv else "N/A"
@@ -143,26 +173,24 @@ def analyze_games(games_list, target_username, min_drop, max_drop):
                 board.push(move)
                 info_next = engine.analyse(board, ENGINE_LIMIT)
                 eval_after = get_my_eval(info_next, my_color)
-
                 eval_drop = round(prev_eval - eval_after, 2)
 
-                # Filter within user-defined tolerance range
                 if min_drop <= eval_drop <= max_drop:
                     if eval_drop >= 1.50:
                         severity = "Blunder"
-                        badge_color = "#FF4B4B"  # Red
+                        badge_color = "#FF4B4B"
                     elif eval_drop >= 0.80:
                         severity = "Mistake"
-                        badge_color = "#FFA500"  # Orange
+                        badge_color = "#FFA500"
                     else:
                         severity = "Inaccuracy"
-                        badge_color = "#F0D000"  # Yellow
+                        badge_color = "#F0D000"
 
                     leaks.append({
-                        "game_id": f"Game {idx + 1}: {white_player} vs {black_player} ({date_played})",
-                        "date": date_played,
-                        "color": color_str,
-                        "opening": opening_name,
+                        "opening_tree": rec["opening_tree"],
+                        "opening_display": rec["display_label"],
+                        "matchup": f"{rec['white']} vs {rec['black']} ({rec['date']})",
+                        "color": rec["player_color"],
                         "move_number": move_num,
                         "played_move": played_move,
                         "engine_best": best_move,
@@ -180,94 +208,165 @@ def analyze_games(games_list, target_username, min_drop, max_drop):
                 info_current = engine.analyse(board, ENGINE_LIMIT)
                 prev_eval = get_my_eval(info_current, my_color)
 
-        progress_bar.progress((idx + 1) / total, text=f"Audited game {idx + 1} of {total}")
+        progress_bar.progress((i + 1) / total, text=f"Evaluating game {i + 1} of {total}...")
 
     engine.quit()
     return leaks
 
-# --- STREAMLIT UI ---
-st.title("♟️ Player Telemetry & Leak Detection Engine")
-st.caption("Heuristic detection pipeline isolating opening inaccuracies and blunders directly from game logs.")
+# --- SESSION STATE INITIALIZATION ---
+if "indexed_games" not in st.session_state:
+    st.session_state.indexed_games = None
+if "username_indexed" not in st.session_state:
+    st.session_state.username_indexed = ""
+if "color_indexed" not in st.session_state:
+    st.session_state.color_indexed = ""
 
+# --- STREAMLIT UI ---
+st.title("♟️ Chess Telemetry & Opening Leak Scanner")
+st.caption("Stage-wise opening risk profiling and targeted move analysis.")
+
+# --- SIDEBAR: STAGE 1 SETUP ---
 with st.sidebar:
-    st.header("Search Parameters")
+    st.header("1. Data Ingestion")
     username_input = st.text_input("Chess.com Username", value="danhonda")
-    game_limit = st.slider("Games to Analyze", min_value=5, max_value=50, value=15, step=5)
-    
+    color_choice = st.radio("Analyze games played as:", ["White", "Black", "All"], index=0)
+    game_limit = st.slider("Matches to Fetch", min_value=5, max_value=60, value=25, step=5)
+
+    fetch_btn = st.button("Fetch & Index Openings", type="primary")
+
     st.markdown("---")
-    st.subheader("Tolerance Calibration")
+    st.header("2. Blunder Calibration")
     eval_range = st.slider(
-        "Eval Drop Range (Pawns Lost)",
+        "Evaluation Drop Range",
         min_value=0.20,
         max_value=3.50,
-        value=(0.30, 1.20),
+        value=(0.30, 1.50),
         step=0.10,
-        help="Filter moves by how much advantage was dropped."
+        help="Loss threshold in pawn equivalents (e.g., 0.3 - 0.9 for slight mistakes)."
     )
     min_drop, max_drop = eval_range
 
-    run_btn = st.button("Run Anomaly Scan", type="primary")
+# --- PIPELINE LOGIC ---
+if fetch_btn and username_input:
+    with st.spinner(f"Pulling recent matches for {username_input}..."):
+        raw_games = fetch_chesscom_games(username_input, max_games=game_limit)
 
-if run_btn and username_input:
-    with st.spinner(f"Pulling recent telemetry for {username_input}..."):
-        recent_games = fetch_chesscom_games(username_input, max_games=game_limit)
+    if raw_games:
+        indexed = index_games_metadata(raw_games, username_input, color_choice)
+        st.session_state.indexed_games = indexed
+        st.session_state.username_indexed = username_input
+        st.session_state.color_indexed = color_choice
 
-    if recent_games:
-        st.info(f"Loaded {len(recent_games)} matches. Running engine audit for drop range **{min_drop:.2f} to {max_drop:.2f} pawns**...")
-        leaks_data = analyze_games(recent_games, username_input, min_drop, max_drop)
+if st.session_state.indexed_games is not None:
+    indexed = st.session_state.indexed_games
+    total_indexed = len(indexed)
 
-        if leaks_data:
-            leaks_df = pd.DataFrame(leaks_data)
-            con = duckdb.connect()
-            con.register("leaks_df", leaks_df)
+    if total_indexed == 0:
+        st.warning(f"No games found matching color '{st.session_state.color_indexed}'.")
+    else:
+        st.subheader("Step 2: Select Opening Lines to Audit")
+        
+        # Calculate opening frequencies and percentages via DuckDB
+        index_df = pd.DataFrame(indexed)
+        con = duckdb.connect()
+        con.register("index_df", index_df)
 
-            # High-level KPIs
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Games Evaluated", len(recent_games))
-            c2.metric("Flagged Inaccuracies", len(leaks_data))
-            avg_loss = con.execute("SELECT ROUND(AVG(eval_drop), 2) FROM leaks_df").fetchone()[0]
-            c3.metric("Avg Drop / Leak", f"-{avg_loss} pawns")
-            affected_games = con.execute("SELECT COUNT(DISTINCT game_id) FROM leaks_df").fetchone()[0]
-            c4.metric("Games with Leaks", affected_games)
+        stats_query = """
+        SELECT 
+            opening_tree,
+            COUNT(*) AS count,
+            ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER(), 1) AS pct
+        FROM index_df
+        GROUP BY opening_tree
+        ORDER BY count DESC
+        """
+        opening_stats = con.execute(stats_query).fetchall()
 
-            st.markdown("---")
-            st.subheader("Audited Matches & Inaccuracies")
+        # Build options dictionary: label -> list of games
+        options_map = {}
+        for tree, cnt, pct in opening_stats:
+            label = f"{tree}  —  {cnt} match{'es' if cnt > 1 else ''} ({pct}%)"
+            options_map[label] = tree
 
-            # Grouping by Game
-            grouped = leaks_df.groupby("game_id")
-            for game_title, group in grouped:
-                with st.expander(f"📌 **{game_title}** — {len(group)} flagged move(s)", expanded=True):
-                    for _, row in group.iterrows():
-                        col_tag, col_move, col_rec, col_drop, col_c, col_l = st.columns([1.2, 1.2, 1.2, 1.2, 2.2, 2.2])
-                        
-                        # Severity badge
-                        col_tag.markdown(
-                            f"<span style='background-color:{row['badge_color']}; color:black; font-weight:bold; padding:3px 8px; border-radius:4px;'>{row['severity']}</span>",
-                            unsafe_allow_html=True
-                        )
-                        col_move.markdown(f"**Move {row['move_number']}:** `{row['played_move']}`")
-                        col_rec.markdown(f"**Best:** `{row['engine_best']}`")
-                        col_drop.markdown(f"**Loss:** `-{row['eval_drop']}`")
-                        col_c.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']})")
-                        col_l.markdown(f"[📖 Full Replay @ Move]({row['lichess_url']})")
+        c_actions, c_blank = st.columns([2, 5])
+        select_all = c_actions.checkbox("Select All Openings", value=True)
 
-            st.markdown("---")
-            st.subheader("Most Repeated Systemic Leaks (DuckDB Aggregation)")
-            summary_query = """
-            SELECT 
-                color,
-                opening,
-                move_number AS move_num,
-                played_move,
-                engine_best,
-                COUNT(*) AS times_repeated,
-                ROUND(AVG(eval_drop), 2) AS avg_eval_lost
-            FROM leaks_df
-            GROUP BY color, opening, move_number, played_move, engine_best
-            ORDER BY times_repeated DESC, avg_eval_lost DESC
-            LIMIT 10
-            """
-            st.dataframe(con.execute(summary_query).df(), use_container_width=True, hide_index=True)
+        with st.form("audit_form"):
+            selected_labels = []
+            st.write("Choose the lines you want Stockfish to analyze:")
+            
+            # 2-column layout for clean checkboxes
+            col_a, col_b = st.columns(2)
+            cols = [col_a, col_b]
 
-        else:
-            st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns.")
+            for i, (label, tree_key) in enumerate(options_map.items()):
+                target_col = cols[i % 2]
+                checked = target_col.checkbox(label, value=select_all, key=f"tree_{tree_key}")
+                if checked:
+                    selected_labels.append(tree_key)
+
+            submit_audit = st.form_submit_button("Run Deep Engine Audit on Selected Lines", type="primary")
+
+        # --- STAGE 2: TARGETED STOCKFISH SCAN ---
+        if submit_audit:
+            if not selected_labels:
+                st.warning("Please check at least one opening sequence.")
+            else:
+                filtered_records = [r for r in indexed if r["opening_tree"] in selected_labels]
+                st.info(f"Analyzing {len(filtered_records)} game(s) matching selected branches...")
+
+                leaks_data = analyze_targeted_games(
+                    filtered_records, 
+                    st.session_state.username_indexed, 
+                    min_drop, 
+                    max_drop
+                )
+
+                if leaks_data:
+                    leaks_df = pd.DataFrame(leaks_data)
+                    con.register("leaks_df", leaks_df)
+
+                    # KPI Cards
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("Audited Matches", len(filtered_records))
+                    k2.metric("Flagged Mistakes", len(leaks_data))
+                    avg_lost = con.execute("SELECT ROUND(AVG(eval_drop), 2) FROM leaks_df").fetchone()[0]
+                    k3.metric("Avg Pawn Loss / Error", f"-{avg_lost}")
+
+                    st.markdown("---")
+                    st.subheader("📊 Vulnerability Summary by Opening (DuckDB)")
+
+                    summary_query = """
+                    SELECT 
+                        color AS "Color",
+                        opening_tree AS "Opening Line",
+                        COUNT(*) AS "Total Mistakes",
+                        ROUND(AVG(eval_drop), 2) AS "Avg Pawn Loss",
+                        MAX(eval_drop) AS "Worst Blunder"
+                    FROM leaks_df
+                    GROUP BY color, opening_tree
+                    ORDER BY "Total Mistakes" DESC, "Avg Pawn Loss" DESC
+                    """
+                    st.dataframe(con.execute(summary_query).df(), use_container_width=True, hide_index=True)
+
+                    st.markdown("---")
+                    st.subheader("📂 Move-by-Move Inspection")
+
+                    grouped = leaks_df.groupby("opening_tree")
+                    sorted_groups = sorted(grouped, key=lambda x: len(x[1]), reverse=True)
+
+                    for tree_name, group in sorted_groups:
+                        with st.expander(f"📁 **Line: {tree_name}** — {len(group)} mistake(s)", expanded=True):
+                            for _, row in group.iterrows():
+                                c_tag, c_match, c_mv, c_best, c_loss, c_links = st.columns([1.2, 2.5, 1.2, 1.2, 1.2, 2.8])
+                                c_tag.markdown(
+                                    f"<span style='background-color:{row['badge_color']}; color:black; font-weight:bold; padding:2px 8px; border-radius:4px;'>{row['severity']}</span>",
+                                    unsafe_allow_html=True
+                                )
+                                c_match.caption(row["matchup"])
+                                c_mv.markdown(f"**Move {row['move_number']}:** `{row['played_move']}`")
+                                c_best.markdown(f"**Best:** `{row['engine_best']}`")
+                                c_loss.markdown(f"**Drop:** `-{row['eval_drop']}`")
+                                c_links.markdown(f"[♟️ Chess.com Board]({row['chesscom_url']}) | [📖 Lichess]({row['lichess_url']})")
+                else:
+                    st.success(f"No leaks found within the range of {min_drop:.2f} to {max_drop:.2f} pawns for the selected lines.")
